@@ -174,18 +174,17 @@ set  traces_new_&archyr.
 *Recode diagnoses to replace truncated leading zeros; 
 array dxcode $ dx1 dx2 dx3; 
 do over dxcode; 
-if dxcode notin("V","E") and dxcode ne "" then do;
-	if indexc(dxcode,".") > 0 then do; 
-		if substr(dxcode,1,1) = "." then dxcode="000"||dxcode;
-		else if substr(dxcode,2,1)="." then dxcode="00"||dxcode;
-		else if substr(dxcode,3,1)="." then dxcode="0"||dxcode;
+if indexc(dxcode,".") > 0 then do; 
+	if substr(dxcode,1,1) = "." then dxcode="000"||dxcode;
+	else if substr(dxcode,2,1)="." then dxcode="00"||dxcode;
+	else if substr(dxcode,3,1)="." then dxcode="0"||dxcode;
 end; 
 
 else if dxcode ne "" then do;
 	if length(dxcode)=1 then dxcode="00"||dxcode;
 	else if length(dxcode)=2 then dxcode="0"||dxcode;
 end; 
-end; 
+
 dxcode=compress(dxcode, ".");
 end;
 
