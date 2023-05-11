@@ -1,0 +1,264 @@
+Cleaning sample program
+
+This program is a modified version of a report I run. Program imports raw excel files, combines them archived dataset, and matches them demographic data. 
+New observations are added to raw excel files each week. Number of observations from excel files are tracked weekly.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+%let archyr = 2021; 
+%let yr1 = 2022; 
+%let yr2 = 2023; 
+%let datetoday = %sysfunc(date(), date9.);
+
+										                                                    /** ICD Version Macro **/
+										
+*Macro to assign code as either ICD9 or ICD10. 	
+*ICD reference table consists of dx code (dx1), dx code name (dx1_Name), and icd_version;
+
+*Put codes from icd version reference table into macros; 
+proc sql noprint; 
+select quote(strip(dx1)) into :dxcode9 separated by "," 
+from icdversion_ref
+where ICD_VERSION=9; 
+
+select quote(strip(dx1)) into :dxcode10 separated by ","
+from icdversion_ref
+where ICD_VERSION=10;
+quit; 
+
+%macro ICDVERSION(); 
+/*Categorize ICD Version based on date / code version*/ 
+if . < ready_date < "01OCT2015"d then ICD_VERSION = 9;
+
+else if ready_date >= "01OCT2015"d then do; 
+
+if anydigit(substr(dx1,1,)) then ICD_VERSION=9; 
+else if anyalpha(substr(dx1,1)) and substr(dx1,1,1) not in("E","V") then ICD_VERSION = 10; 
+
+if dx1 in(&dxcode9.) then ICD_VERSION = 9; 
+if dx1 in(&dxcode10.) then ICD_VERSION = 10; 
+if dx1 = "" then ICD_VERSION = 10; 
+
+end; 
+%mend ICDVERSION; 
+
+										                                            /** Import Excel Files **/
+%macro new_in; 
+
+/*Import*/
+proc import datafile="&file."
+	out=file_&year. 
+	dbms=xlsx
+	replace; 
+run;
+
+/*Empty date fields will import as character instead of numeric. Convert to numeric datetime.*/
+data temp_&year. (rename=(ready_temp = ready_date
+						  admission_temp = admission_date
+						  disposition_temp = disposition_date));
+						  
+set file_&year.;
+
+	if ready_date = "." then do; 
+	   ready_date="";
+	   ready_temp=input(ready_date,anydtdtm.);
+	end;
+	else ready_temp = ready_date; 
+	
+	if admission_date = "." then do; 
+	   admission_date="";
+	   admission_temp=input(admission_date,anydtdtm.);
+	end; 
+	else admission_temp=admission_date; 
+	
+	if disposition_date = "." then do; 
+	   disposition_date="";
+	   disposition_temp=input(disposition_date,anydtdtm.);
+	end; 
+	else disposition_temp=disposition_date; 
+	
+format ready_temp admission_temp disposition_temp datetime20.;
+
+drop ready_date admission_date disposition_date; 
+run; 
+
+/*Convert datetime dates to character strings and keep format. Archive dataset has these variables as both 
+datetime character strings and as numeric dates*/ 
+data chardt_&year.; 
+set temp_&year.; 
+Ready_Date1 = vvalue(ready_date);
+D_Admission1 = vvalue(admission_date);
+D_Disposition = vvalue(disposition_date);
+run; 
+
+/*Order, rename, and keep vars*/
+proc sql; 
+	create table traces_&year. as 
+	select patient_last_name as LName, 
+	       patient_first_name as FName, 
+	       patient_id_type, 
+	       patient_id, 
+	       put(age,3.) as age, 
+	       age_unit, 
+	       gender, 
+	       ready_date1, 
+	       primary_diagnosis_code as dx1, 
+	       primary_diagnosis_name as dx1_Name, 
+	       secondary_diagnosis_code as dx2, 
+	       secondary_diagnosis_name as dx2_Name, 
+	       other_diagnosis_code as dx3, 
+	       other_diagnosis_name as dx3_Name, 
+	       d_admission1, 
+	       d_disposition, 
+	       history, 
+	       datepart(ready_date) as ready_date format=mmddyy10., 
+	       datepart(admission_date) as admission_date format=mmddyy10., 
+	       datepart(disposition_date) as disposition_date format=mmddyy10., 
+	       
+	       /*add leading zeros for ssn*/ 
+	       put(patient_id_type,z9.) as ssn, 
+	       
+	       /*flag for mental in history*/
+	       case when indexw(lowcase(history), "mental")>0 or indexw(lowcase(history), "psych")>0 then "Y"
+	       else ""
+	       end as mental_flag, 
+	       
+	       year(datepart(ready_date)) as year
+
+from chardt_&year.;
+quit; 
+%mend new_in; 
+%let file=excel_file1.xlsx; %let year=&yr1.; %new_in; 
+%let file=excel_file2.xlsx; %let year=&yr2.; %new_in; 
+
+*We are going to set traces files with archive dataset. Text variables from these files have different lengths. 
+We are going to assign the longest length for each variable between all files; 
+proc contents data=traces_archive_2001_to_&archyr. out=dict_archive (keep=name type length varnum); run; 
+proc contents data=traces_&yr1.                    out=dict_&yr1.   (keep=name type length varnum); run;
+proc contents data=traces_&yr2.					   out=dict_&yr2.   (keep=name type length varnum); run;
+
+*All variables should be named the same and have same type at this point; 
+proc sql; 
+	create table temp_all as 
+		select a.name, a.type, a.varnum, 
+			   case when a.type=2 then cats("$",left(trim(put(max(a.length,b.length,c.length),4.))))
+			   else left(trim(put(max(a.length,b.length,c.length),4.)))
+			   end as max_length
+    from dict_archive as a left join dict_&yr1. as b on a.name=b.name
+         				   left join dict_&yr2. as c on a.name=c.name
+    order by a.varnum;
+    
+    select count(name) into :nname from temp_all;
+    select name, max_length into :namevar1 - :namevar%left(&nname), :lenvar1 - :lenvar%left(&nname) from temp_all order by varnum;
+    
+quit; 
+
+%macro lenset; 
+data traces_new_&yr.; 
+attrib 
+	%do i = 1 %to &nname.;
+	&&namevar&i length = &&lenvar&i
+	%end; 
+	; 
+set &dsn.;
+run; 
+%mend lenset; 
+%let dsn=traces_archive_2001_to_&archyr.; %let yr=&archyr.; %lenset; 
+%let dsn=traces_&yr1.;					  %let yr=&yr1.;    %lenset; 
+%let dsn=traces_&yr2.;					  %let yr=&yr2.; 	%lenset; 
+
+data traces_nondemog; 
+set  traces_new_&archyr.
+ 	 traces_new_&yr1.
+ 	 traces_new_&yr2.;
+ 	 
+*Identify military working dogs; 
+if prxmatch("m/(Military\s|\s)Working Dog|MWD|K-?9|Leash|Paw|Claws|Kennel|Muzzle|Dog/oi",history) >0 and input(age,2.) < 18 then MWD = 1;
+else MWD=0; 
+
+*Run ICD Version macro; 
+%ICDVERSION
+
+run; 
+
+										                                      /** Weekly Tracking of Observations**/
+*Excel files add new observations each week. Each week we track how many observations are in the excel files and calculate the difference 
+between each week;
+
+*Import tracking sheet; 
+proc import datafile="weekly_tracking_sheet.xlsx"
+	out=tracking_sheet_in
+	dbms=xlsx
+	replace;
+	sheet="&yr2.";
+run; 
+
+*Get counts of each excel file; 
+proc sql noprint; 
+	select count(*) into :obs1 from traces_new_&yr1.;
+	select count(*) into :obs2 from traces_new_&yr2.;
+quit; 
+
+*Delete row if today's date is already in tracking sheet (sometimes the program has to be re-run). Insert row with today's date and counts;
+proc sql; 
+	delete from tracking_sheet_in 
+	where date_updated = "&datetoday."d;
+	
+	insert into tracking_sheet_in 
+	set date_updated 	  = "&datetoday."d,
+	    cy_&yr1.	 	  = &obs1.,
+	    cy_&yr2. 	 	  = &obs2., 
+	    weekly_diff_&yr1. = 0, 
+	    weekly_diff_&yr2. = 0;
+quit; 
+
+*Calculate weekly diff;
+data tracking_sheet_out; 
+set  tracking_sheet_in; 
+
+format date_updated mmddyy8.;
+retain date_updated cy_&yr1. cy_&yr2.; 
+
+if _n_ ne 1 then do; /*can't calculate diff for first obs*/
+	lag1 = lag(cy_&yr1.);
+	lag2 = lag(cy_&yr2.); 
+end; 
+
+if date_updated = "&datetoday"d then do; 
+	weekly_diff_&yr1. = &obs1 - lag1;
+	weekly_diff_&yr2. = &obs2 - lag2; 
+end; 
+
+drop lag1 lag2;
+run; 
+
+*Export; 
+proc export outfile="weekly_tracking_sheet.xlsx"
+	data=tracking_sheet_out
+	dbms=xlsx
+	replace;
+	sheet="&yr2.";
+run;
+
+										                                         /** Match with Demographics (DEMOG) data **/
+*Create cutoff date that will be used for extending demog record; 
+%let d_cutoff = %sysfunc(intx(month,%sysfunc(date()),-5,end), date9.);
+
+proc sql; 
+	*calculate last day on demog file and upload into macro variable; 
+	select ""||put(max(datepart(a.d_end)),date9.)||"" into :thru_date 
+		from demog as a 
+			where a.d_end >= "&d_cutoff"d;
+	
+	create table traces_demog as 
+		select b.*, 
+			   a.service, 
+			   a.component, 
+			   datepart(a.dob) as dob format=date9.,
+			   datepart(a.d_start) as d_start format=date9.,
+			   datepart(a.d_end) as d_end format=date9., 
+			   a.ssn
+		 case when a.ssn ne "" then 1 else 0 end as demog_matched
+	from demog as a right join traces_nondemog as b on a.ssn=b.ssn 
+		and ((b.ready_date between a.d_start and a.d_end) OR 
+		    (b.ready_date >= a.d_start and a.d_end ="&thru_date"d and b.ready_date <= "&datetoday"d));
+quit; 
