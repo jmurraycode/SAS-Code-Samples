@@ -3,7 +3,6 @@ Cleaning sample program
 This program is a modified version of a report I run. Program imports raw excel files, combines them archived dataset, and matches them demographic data. 
 New observations are added to raw excel files each week. Number of observations from excel files are tracked weekly.
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
-
 %let archyr = 2021; 
 %let yr1 = 2022; 
 %let yr2 = 2023; 
