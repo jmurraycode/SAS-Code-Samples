@@ -1,6 +1,7 @@
 Cleaning sample program
 
-This program is a modified version of a report I run. Program imports raw excel files, combines them archived dataset, and matches them demographic data. 
+This program is a modified version of a report I currently run. Program imports raw excel files of medically evacuated service members, combines these excel files 
+with an archived dataset of previously medically evacuated service members, and then matches this combined dataset with our current demographic data. 
 New observations are added to raw excel files each week. Number of observations from excel files are tracked weekly.
 --------------------------------------------------------------------------------------------------------------------------------------------------------------
 %let archyr = 2021; 
@@ -170,6 +171,24 @@ set  traces_new_&archyr.
  	 traces_new_&yr1.
  	 traces_new_&yr2.;
  	 
+*Recode diagnoses to replace truncated leading zeros; 
+array dxcode $ dx1 dx2 dx3; 
+do over dxcode; 
+if dxcode notin("V","E") and dxcode ne "" then do;
+	if indexc(dxcode,".") > 0 then do; 
+		if substr(dxcode,1,1) = "." then dxcode="000"||dxcode;
+		else if substr(dxcode,2,1)="." then dxcode="00"||dxcode;
+		else if substr(dxcode,3,1)="." then dxcode="0"||dxcode;
+end; 
+
+else if dxcode ne "" then do;
+	if length(dxcode)=1 then dxcode="00"||dxcode;
+	else if length(dxcode)=2 then dxcode="0"||dxcode;
+end; 
+end; 
+dxcode=compress(dxcode, ".");
+end;
+
 *Identify military working dogs; 
 if prxmatch("m/(Military\s|\s)Working Dog|MWD|K-?9|Leash|Paw|Claws|Kennel|Muzzle|Dog/oi",history) >0 and input(age,2.) < 18 then MWD = 1;
 else MWD=0; 
