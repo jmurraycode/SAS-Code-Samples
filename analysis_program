@@ -1,0 +1,552 @@
+Program was used for study to evaluate the incidence of colorectal cancer among service members during 2016-2020. 
+Program creates three tables: 
+Table 1: Overall incident Counts and incidence rates (per 100,000 perosn-years) of colorectal cancer
+Table 2: Incident counts and incidence rates (per 100,000 person-years) of colorectal cancer BY YEARS
+Table 3: Age-adjusted incident counts and incidence rates (per 100,000 person-years) of colorectal cancer
+--------------------------------------------------------------------------------------------------------------
+
+proc format; 
+	value $svcfmt (notsorted) "A" = "01.1 Army"
+	   						  "N" = "01.2 Navy"
+						      "M" = "01.3 Marine Corps"
+							  "F" = "01.4 Air Force"
+							  "C" = "01.5 Coast Guard";
+
+	value $sexfmt (notsorted) "M" = "02.1 Male"
+							  "F" = "02.2 Female";
+
+	value $racefmt (notsorted) "W" = "03.1 Non-Hispanic White"
+							   "B" = "03.2 Non-Hispanic Black"
+						       "H" = "03.3 Hispanic"
+					         other = "03.4 Other";
+					         
+	value agefmt (notsorted) 20-24 = "04.1 20-24"
+					         25-29 = "04.2 25-29"
+						     30-34 = "04.3 30-34"
+							 35-39 = "04.4 35-39"
+							 40-44 = "04.5 40-44"
+					       45-high = "04.6 45+";
+run;
+
+*Case definitions: 
+1. Inpatient encounter with qualifying dx code in dx1 or 
+2. Inaptient encounter with a qualifying dx code in dx2 and treatment code or 
+3. Three or more outpatient encounters within a 90-day period (but not on the same day) with a qualifying dx code in dx1 or dx2. ;
+
+*Inpatient ICD9 data;
+data inpt9; set libname.inpt9; 
+if dx1 in ("1534","1536","1530","1531") OR 
+  (dx2 in ("1534","1536","1530","1531") AND substr(dx1,4) in("V580"))
+then output;
+run; 
+
+*Inpatient ICD10 data; 
+data inpt10; set libname.inpt10; 
+if dx1 in ("C180","C182","C183","C184") OR 
+  (dx2 in ("C180","C182","C183","C184") AND substr(dx1,4) in("Z510","Z511"))
+then output;
+run;
+
+*Stack; 
+data inpt_cases;
+set  inpt9	
+	 inpt10;
+run;
+
+*Combine outpatient ICD9 and ICD10 data; 
+data outpt; 
+set libname.outpt9 
+    libname.outpt10; 
+if dx1 in ("1534","1536","1530","1531","C180","C182","C183","C184") OR 
+   dx2 in ("1534","1536","1530","1531","C180","C182","C183","C184")
+then output; 
+run;
+
+*Dedup encounters by date; 
+proc sort data=outpt; by ssn d_event; run;
+proc sort data=outpt out=outpt_nodup nodupkey; by ssn d_event; run;
+data outpt_90day; retain incident_d_event d_event_90;
+set outpt_nodup; 
+by ssn; 
+
+format incident_d_event date9. d_event_90 date9.;
+
+if first.ssn then do; 
+	incident_d_event = d_event; 
+	d_event_90 = d_event + 90;
+end; 
+
+else if d_event > d_event_90 then do; 
+	incident_d_event= d_event; 
+	d_event_90 = d_event+90; 
+end; 
+run; 
+
+proc sql; 
+	create table outpt_90day_2 as 
+		select *, count(*) as incident_count 
+	from outpt_90day
+	group by ssn, incident_d_event 
+	having incident_count > 2 
+	order by ssn, incident_d_event, d_event; 
+quit; 
+
+proc sort data=outpt_90day_2 out=outpt_cases nodupkey; by ssn; run;
+
+*Combine inpt/outpt cases; 
+data inpt_outpt; 
+set  outpt_cases (in=a)
+	 inpt_cases  (in=b); 
+
+*Recode Space Force to Air Force;
+if service = "S" then service = "F";
+
+length source $5;
+if a = 1 then source = "OUTPT";
+if b = 1 then source = "INPT";
+
+if incident_d_event ge "01JAN2016"d and incident_d_event le "31DEC2022"d; 
+run; 
+
+*Select earliest qualifying incident case date per person; 
+*A person is counted once per lifetime.;
+proc sort data=inpt_outpt; by ssn d_event; run;
+proc sort data=inpt_outpt out=final_cases ndoupkey; by ssn; run;
+
+*Demog (Demographics data) – in the server code used to pull demog data, we only pulled cases that occurred during the surveillance period (2016-2022); 
+proc sql; 
+	create table demog_cases as 
+		select a.*, b.d_event, b.source, b.dx1, b.dx2 
+	from libname.demog as a left join final_cases as b 
+on a.ssn=b.ssn;
+quit; 
+
+data demog; set demog_cases; 
+
+*extend demog data (demog data is not always loaded til end of study period); 
+if d_end = "30NOV2022"d then d_event = "31DEC2022"d; 
+
+age = floor(intck("day",dob,d_start)-(day(d_start)<day(dob)))/365.25);
+
+if sex in("M","F");
+
+if service = "S" then service = "F";
+
+*censor person time at time of incident encounter;
+if d_start <= d_event <= d_end then do; 
+	d_end = min(d_event, d_end);
+end; 
+
+else if d_event ne . and d_start > d_event then delete; 
+run; 
+
+/**Calculate person time with work created saved person-time macro. Generates dataset called ptime_year**/
+
+*For rates calculates in proc tabulate: 
+percent conversion needs to be applied to the person time first, otherwise the calculations will be off. Multiply person time by 100 and then adjust by 100,000 to get rates per 100,000 
+to work with PCTSUM used in proc tabulate; 
+
+data ptime_year_case; set ptime_year; 
+
+case_var = 0; 
+
+if period_start <= d_event <= period_end then case_var =1; 
+
+Py_pctconv = pt_years * 100; /*pt_years is the person-time variable created by the person-time macro*/
+Py_100000=py_pctconv/100000; 
+
+*only keep individuals within the study population age; 
+if 20 <= age <=59 then output; 
+run;
+
+/*Table 1: Overall incident counts and incidence rates (per 100,000 perosn-years) of colorectal cancer*/ 
+/*For table we need no. cases person-time years, rate per 100,000 + CI [rate, (CI)], incidence rate ratio*/
+*To get 95% confidence interval rates, use proc stdrate to compute direct and indirect standardized rates; 
+
+%macro tab1tot; 
+/*Get pop counts and sum of ptyears – this is our reference for proc stdrate*/ 
+proc sql; 
+	create table pop_counts as 
+		select put(&orgvar.,&fmt.) as &var., 
+		       count(ssn) as event, 
+			   sum(pt_years) as ptyears 
+	from ptime_year_case
+	group by &var.;
+
+/*Get counts of cases – this is our population*/ 
+	create table case_counts as 
+		select put(&orgvar.,&fmt.) as &var., 
+			   count(ssn) as case_cnt 
+	from ptime_year_case
+	where case_var=1
+	group by &var.;
+
+/*The count datasets must match in order to run proc stdrate. If something is missing, we will set zeroes to very small numbers to allow proc stdrate to run*/ 
+
+/*Use overall ptyears so proc stdrate calculates the rate correctly – rates will match to proc tabulate person time if the overall person time is used for both the reference and population in proc stdrate*/ 
+
+	create table case_counts2 as 
+		select a.&var., 
+			   case when b.case_cnt ne . then b.case_cnt else 0.000000001 end as event, a.ptyears
+		from pop_counts as a left join case_counts as b on a.&var.=b.&var.;
+quit; 
+
+ods graphics off; 
+ods output StdRate=output_total; 
+ods output StrataStats=output_stats; /*to output results for each of our values*/ 
+proc stdrate data=case_counts2 refdata=pop_counts
+method=indirect
+stat=rate(mult=100000) /*to get 100,000 person years*/
+;
+population event = event total=ptyears;
+reference  event = event total=ptyears; 
+strata &var. / stats; /*to output results for each of our values*/ 
+run; 
+
+proc sql; 
+	create table output_stats_&var. as 
+		select &var. as demo length = 30, observedevents as no_cases, 
+			   poptime as ptyears, cruderate, put(cruderate,8.2) as crude, 
+			   put(lowercl,8.2) as lower, put(uppercl,8.2) as upper
+	from output_stats;
+
+/*Total is the same for each run so basically we are just re-running/outputting each time to get an output so we don’t have do it separately*/ 
+	create table output_stats_total as 
+		select "00.0 Total" as demo length = 30, observedevents as no_cases, 
+			   poptime as ptyears, cruderate, put(cruderate,8.2) as crude, 
+			   put(lowercl,8.2) as lower, put(uppercl,8.2) as upper 
+	from output_total;
+quit;
+%mend tab1tot; 
+%let orgvar=service;    %let fmt=$svcfmt.;   %let var=svccat; %tab1tot; 
+%let orgvar=sex;         %let fmt=$sexfmt.;  %let var=sexcat; %tab1tot; 
+%let orgvar=race_ethnic; %let fmt=$racefmt.; %let var=racecat; %tab1tot; 
+
+data table1_allsvc; 
+set output_stats_total
+    output_stats_svccat
+	output_stats_sexcat
+	output_stats_racecat;
+length rate $23; 
+rate = trim(left(crude))||""||"("||trim(left(lower))||", "||trim(left(upper))||")");
+run; 
+
+*IRR: calculate incidence rate ratio; 
+data table1_irr_ref; set table1_allsvc; 
+if strip(demo) = "01.1 Army" then ref=1;
+else if strip(demo) = "02.1 Male" then ref=1; 
+else if strip(demo) = "03.1 Non-Hispanic White" then ref=1;
+
+var_name = substr(demo,1,2); 
+run; 
+
+proc sort data=table1_irr_ref; by var_name descending ref; run; 
+
+data table1_irr_calc; retain ref_rate cruderate;
+set  table1_irr_ref; 
+by   var_name; 
+
+if first.var_name then do; 
+	ref_rate = cruderate; 
+	irr=1; 
+end; 
+
+else do; 
+irr=cruderate/ref_rate;
+end; 
+
+if demo = "00.0 Total" then irr = .; 
+run; 
+
+data table1_all_svc_final; retain demo no_cases_ptyears rate irr_format; 
+set table1_irr_calc; 
+
+irr_format=left(put(irr,6.2));
+
+if ref=1 then irr_format="Ref";
+else irr_format=irr_format;
+
+keep demo no_cases ptyears rate irr_format;
+run; 
+
+proc sort data=table1_allsvc_final; by demo; run; 
+
+/*Table 2: Incident counts and incidence rates (per 100,000 person-years) of colorectal cancer BY YEARS*/
+/*For table, we need no cases, person-time years, and rate per 100,000 and each year of surveillance period (2016-2022)*/
+*Counts and rates by year; 
+proc tabulate data=ptime_year_case out=case_count_total_year;
+class service sex race_ethinic / missing predloadfmt order=data; 
+class interval; /*character year variable*/
+classlevel service sex race_ethinic / s=data; 
+var case_var pt_years py_100000;
+table all service sex race_ethinic, 
+interval * /*interval is a character format year variable created by person-time macro*/
+(case_var*(sum*f=comma7.)
+ pt_years*sum*f=comma10.
+ case_var*(ptcsum<Py_100000>))
+
+case_var*(sum*f=comma7)
+case_var*(pctsum<100000>) / printmiss misstext=”0” nocellmerge;
+
+format service $svcfmt. sex $sexfmt. race_ethnic $racefmt.;
+run; 
+
+data case_count_year_cat; 
+length demo $30 interval $5;
+set case_count_total_year; 
+
+if service="" and sex="" and race_ethnic="" and interval ne "" then do; 
+	demo="00.0 Total"; rate=PctSum; 
+end;
+ 
+else if service="" and sex="" and race_ethnic="" and interval="" then do; 
+	demo="00.0 Total"; interval="Total"; rate=PctSum2; 
+end;
+ 
+else if service ne "" and interval ne "" then do; 
+	demo=put(service,$svcfmt.); rate=PctSum3; 
+end; 
+
+else if service ne "" and interval="" then do; 
+	demo=put(service,$svcfmt.); interval="Total"; rate=PctSUm4; 
+end; 
+
+else if sex ne "" and interval ne "" then do; 
+	demo=put(sex,$sexfmt.); rate=PCtSum5; 
+end; 
+
+else if sex ne "" and interval="" then do; 
+	demo=put(sex,$sexfmt.); interval="Total"; rate=PctSum6; 
+end; 
+
+else if race_ethnic ne ""and interval ne "" then do; 
+	demo=put(race_ethinic,$racefmt.); rate=PctSum7;
+end; 
+
+else if race_ethinic ne "" and interval="" then do; 
+	demo=put(race_ethinic,$racefmt.); interval="Total"; rate=PctSum8; 
+end; 
+
+keep demo interval case_var_sum pt_years_sum rate; 
+run; 
+
+*Transpose; 
+proc sql; 
+	create table table2_final as 
+		select demo, 
+		max(case when interval="Total" then case_var_sum else . end) as case_no_tot, 
+		max(case when interval="Total" then rate else . end) as rate_tot format=8.2, 
+
+		max(case when interval="2016" then case_var_sum else . end) as case_no_16, 
+		max(case when interval="2016" then rate else . end) as rate_16 format=8.2, 
+		
+		max(case when interval="2017" then case_var_sum else . end) as case_no_17, 
+		max(case when interval="2017" then rate else . end) as rate_17 format=8.2, 
+		
+		max(case when interval="2018" then case_var_sum else . end) as case_no_18, 
+		max(case when interval="2018" then rate else . end) as rate_18 format=8.2, 
+		
+		max(case when interval="2019" then case_var_sum else . end) as case_no_19, 
+		max(case when interval="2019" then rate else . end) as rate_19 format=8.2, 
+		
+		max(case when interval="2020" then case_var_sum else . end) as case_no_20, 
+		max(case when interval="2020" then rate else . end) as rate_20 format=8.2, 
+		
+		max(case when interval="2021" then case_var_sum else . end) as case_no_21, 
+		max(case when interval="2021" then rate else . end) as rate_21 format=8.2, 
+		
+		max(case when interval="2022" then case_var_sum else . end) as case_no_22, 
+		max(case when interval="2022" then rate else . end) as rate_22 format=8.2
+
+from case_count_year_cat
+group by demo
+order by demo;
+quit; 
+
+/* Table 3: Age-adjusted Incident counts and incidence rates (per 100,000 person-years) of colorectal cancer*/ 
+/*For table we need no. cases person-time years, adjusted rate per 100,000 + CI [rate, (CI)], incidence rate ratio*/
+
+*Dummy code data so that we have a comparison group for proc stdrate for adjusted rates. Proc stdrate is comparing the standard rates for the two populations; 
+data dummy_code; set ptime_year_case; 
+if service = "A" then army=1;   else army=0; 
+if service = "N" then navy=1;   else navy=0; 
+if service = "M" then marine=1; else marine=0;
+if service = "F" then force=1;  else force=0; 
+if service = "C" then coast=1;  else coast=0; 
+
+if sex = "M" then male=1;   else male=0; 
+if sex = "F" then female=1; else female=0; 
+
+if race_ethinic = "W" then white=1;  else white=0; 
+if race_ethinic = "B" then black=1;  else black=0; 
+if race_ethinic = "H" then hispanic; else hispanic=0; 
+if race_ethinic in("A","I","O","Z") then raceother=1; else raceother=0; 
+
+drop service sex race_ethinic; 
+run; 
+
+/*Get population counts for each age group*/ 
+%macro tab3; 
+proc sql; 
+	create table pop_counts as 
+		select put(age,agefmt.) as agegrp, &dummy., count(ssn) as event, sum(pt_years) as ptyears 
+	from dummy_code
+	group by agegrp, &dummy.;
+
+	create table case_counts as 
+		select put(age,agefmt.) as agegrp, &dummy., count(ssn) as case_cnt
+	from dummy_code
+	where case_var=1
+	group by agegrp, &dummy.; 
+
+/*The count datasets must match in  order to run proc stdrate. If something is missing, we will set zeros to very small number to allow proc stdrate to run*/
+/*Use the overall ptyears so proc stdrate calculate the rate correctly*/ 
+
+	create table case_counts2 as 
+		select a.agegrp, a.&dummy., 
+		      case when b.case_cnt ne . then b.case_cnt else 0.000000001 end as event, 
+		      a.ptyears
+	from pop_counts as a left join case_counts as b on a.agegrp=b.agegrp and a.&dummy.=b.&dummy.;
+quit; 
+
+/*Direct standardization to get our age adjusted rates and CIs*/ 
+ods output StdRate=output_total; 
+proc stdrate data=case_counts2 refdata=pop_counts
+method=direct
+stat=rate(mult=100000) /*100,000 person years*/
+;
+population group=&dummy. event=event total=ptyears;
+reference total=ptyears;
+strata agegrp; /*statra to indicate what we want to standaraize the data by*/
+run; 
+
+/*Put each value into a dataset – keep crude as a QC check for table 1. Crude should match table 1*/ 
+data tab3_output&no.; length demo $30; 
+set output_total; 
+demo = “&demovar.”; 
+rename observedevents = no_cases; 
+rename poptime = ptyears; 
+crude = put(cruderate,8.2); 
+srate = put(StdRate,8.2);
+lower = put(lowercl,8.2); 
+upper = put(uppercl,8.2);
+
+keep demo observedevents poptime crude StdRate srate lower upper; 
+where &dummy.=1;
+run; 
+%mend tab3; 
+%let dummy=army;   %let demovar=01.1 Army;         %let no=1; %tab3; 
+%let dummy=navy;   %let demovar=01.2 Navy;         %let no=2; %tab3; 
+%let dummy=marine; %let demovar=01.3 Marine Corps; %let no=3; %tab3;
+%let dummy=force;  %let demovar=01.4 Air Force;    %let no=4; %tab3; 
+
+%let dummy=male;      %let demovar=02.1 Male;               %let no=6; %tab3; 
+%let dummy=female;    %let demovar=02.2 Female;             %let no=7; %tab3; 
+%let dummy=white;     %let demovar=03.1 Non-Hispanic White; %let no=8; %tab3; 
+%let dummy=black;     %let demovar=03.2 Non-Hispanic Black; %let no=9; %tab3; 
+%let dummy=sispanic;  %let demovar=03.3 Hispanic;           %let no=10; %tab3; 
+%let dummy=raceother; %let demovar=03.4 Other;              %let no=11; %tab3; 
+
+/*Stack values into one dataset for each variable*/
+%macro tab31; 
+data output_tab3_vars;
+set 
+	%do i = 1 %to 11; 
+	tab3_output&i
+	%end; 
+; 
+run;
+%mend tab31;
+%tab31; 
+
+/*Run for total*/
+proc sql; 
+	create table pop_counts as /*reference events are not needed in proc stdrate for direct method. Do not need to calculate here*/ 
+		select put(age,agefmt.) as agegrp, sum(pt_years) as ptyears 
+	from dummy_code
+	group by agegrp; 
+
+	create table case_counts as 
+		select put(age,agefmt.) as agegrp, case_var, count(case_var) as case_cnt 
+	from dummy_code
+	group by agegrp, case_var;
+
+	create table case_counts2 as 
+		select a.agegrp, b.case_var, 
+			   case when b.case_cnt ne . then b.case_cnt else 0.000000001 end as event, 
+		a.ptyears
+from pop_counts as a left join case_counts as b on a.agegrp=b.agegrp;
+quit; 
+
+/*Direct standardization to get our age adjusted rates and CIs*/ 
+ods output StdRate=output_total;
+proc stdrate data=case_counts2 refdata=pop_counts
+method=direct
+stat=rate (mult=100000)
+;
+population group=case_var event=event total=ptyears; 
+reference total=ptyears; 
+strata agegrp; 
+run; 
+
+data output_tab3_tota; length demo $30; 
+set output_total; 
+demo = "00.0 Total"; 
+rename observedevents=no_cases; 
+rename poptime=ptyears; 
+crude = put(cruderate,8.2);
+srate = put(StdRate,8.2); 
+lower = put(lowercl,8.2);
+upper = put(uppercl,8.2); 
+
+keep demo observedevents poptime crude StdRate srate lower upper; 
+run; 
+
+data table3_stack; 
+set output_tab3_total
+	output_tab3_var; 
+
+length rate $23;
+rate = trim(left(crude))||""||"("||trim(left(lower))||", "||trim(left(upper))||")");
+drop crude; 
+run; 
+
+*IRR: calculate incidence rate ratio;
+data table3_irr_ref; 
+set table3_stack; 
+if strip(demo) = "01.1 Army" then ref=1; 
+else if strip(demo) = "02.1 Male" then ref=1; 
+else if strip(demo) = "03.1 Non-Hispanic White" then ref=1; 
+
+var_name = substr(demo,1,2); 
+run; 
+
+proc sort data=table3_irr_ref; by var_name descending ref; run; 
+
+data table3_irr_calc; retain ref_rate stdrate; 
+set table3_irr_ref; 
+by var_name; 
+
+if first.var_name then do; 
+	ref_rate = StdRate; 
+	irr=1; 
+end; 
+
+else do; 
+	irr=StdRate/ref_rate; 
+end; 
+
+if demo="00.0 Total" then irr=.; 
+run; 
+
+data table3_final; retain demo no_cases ptyears rate irr_format; 
+set table3_irr_calc; 
+
+irr_format=left(put(irr,6.2)); 
+if ref= 1 then irr_format="Ref";
+else irr_format=irr_format; 
+
+keep demo no_cases ptyears rate irr_format; 
+run;
+ 
+proc sort data=table3_final; by demo; run; 
