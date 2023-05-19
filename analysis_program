@@ -36,7 +36,7 @@ run;
 *Inpatient ICD9 data;
 data inpt9; set libname.inpt9; 
 if dx1 in ("1534","1536","1530","1531") OR 
-  (dx2 in ("1534","1536","1530","1531") AND dx1 in("V580"))
+  (dx2 in ("1534","1536","1530","1531") AND substr(dx1,1,4) in("V580"))
 then output;
 run; 
 
