@@ -116,7 +116,7 @@ run;
 *Select earliest qualifying incident case date per person; 
 *A person is counted once per lifetime.;
 proc sort data=inpt_outpt; by ssn d_event; run;
-proc sort data=inpt_outpt out=inpt_outpt ndoupkey; by ssn; run;
+proc sort data=inpt_outpt out=inpt_outpt2 ndoupkey; by ssn; run;
 
 *Restrict surveillance period; 
 data final_cases prior_surv; set inpt_outpt2; 
