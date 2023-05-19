@@ -36,14 +36,14 @@ run;
 *Inpatient ICD9 data;
 data inpt9; set libname.inpt9; 
 if dx1 in ("1534","1536","1530","1531") OR 
-  (dx2 in ("1534","1536","1530","1531") AND substr(dx1,4) in("V580"))
+  (dx2 in ("1534","1536","1530","1531") AND dx1 in("V580"))
 then output;
 run; 
 
 *Inpatient ICD10 data; 
 data inpt10; set libname.inpt10; 
 if dx1 in ("C180","C182","C183","C184") OR 
-  (dx2 in ("C180","C182","C183","C184") AND substr(dx1,4) in("Z510","Z511"))
+  (dx2 in ("C180","C182","C183","C184") AND substr(dx1,1,4) in("Z510","Z511"))
 then output;
 run;
 
@@ -105,13 +105,18 @@ length source $5;
 if a = 1 then source = "OUTPT";
 if b = 1 then source = "INPT";
 
-if incident_d_event ge "01JAN2016"d and incident_d_event le "31DEC2022"d; 
 run; 
 
 *Select earliest qualifying incident case date per person; 
 *A person is counted once per lifetime.;
 proc sort data=inpt_outpt; by ssn d_event; run;
-proc sort data=inpt_outpt out=final_cases ndoupkey; by ssn; run;
+proc sort data=inpt_outpt out=inpt_outpt ndoupkey; by ssn; run;
+
+*Restrict surveillance period; 
+data final_cases prior_surv; set inpt_outpt2; 
+if d_event ge "01JAN2016"d and d_event le "31DEC2022"d then output final_cases;
+if d_event ne . and d_event le "01JAN2016"d then output prior_surv; 
+run;
 
 *Demog (Demographics data) – in the server code used to pull demog data, we only pulled cases that occurred during the surveillance period (2016-2022); 
 proc sql; 
@@ -119,9 +124,15 @@ proc sql;
 		select a.*, b.d_event, b.source, b.dx1, b.dx2 
 	from libname.demog as a left join final_cases as b 
 on a.ssn=b.ssn;
+
+*remove cases and their person time from the study population if the incident case occurs prior to the start of the surveillance period on 01JAN2016;
+create table demog_cases2 as 
+select * 
+from demog_cases 
+where ssn not in (select ssn from prior_surv);
 quit; 
 
-data demog; set demog_cases; 
+data demog; set demog_cases2; 
 
 *extend demog data (demog data is not always loaded til end of study period); 
 if d_end = "30NOV2022"d then d_event = "31DEC2022"d; 
