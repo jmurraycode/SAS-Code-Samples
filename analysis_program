@@ -33,6 +33,12 @@ run;
 2. Inaptient encounter with a qualifying dx code in dx2 and treatment code or 
 3. Three or more outpatient encounters within a 90-day period (but not on the same day) with a qualifying dx code in dx1 or dx2. ;
 
+*Incidence Rules: 
+For individuals who meet the case definition: 
+1. The incidence date is considered the date of the first hospitalization OR the first date of the three or more outpatient 
+medical encounters occurring within a 90-day period that includes a case defining dx of colorectal cancer.
+2. An individual is considered an incident case only once per lifetime; 
+
 *Inpatient ICD9 data;
 data inpt9; set libname.inpt9; 
 if dx1 in ("1534","1536","1530","1531") OR 
