@@ -165,8 +165,8 @@ proc sql;
 	on a.ssn=b.ssn and a.date = b.incident_date;
 quit; 
 
-*Keep the record with the first incident date per person; 
-proc sort data=incident_dates; by ssn incident_date; run;
+*Keep the record with the first incident date per person. Sort so non-missing dates end up first in dataset; 
+proc sort data=incident_dates; by ssn descending incident_date; run;
 proc sort data=incident_dates out=outpatient_cases nodupkey; by ssn; run;
 
 ----- 
