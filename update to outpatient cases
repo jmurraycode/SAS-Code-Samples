@@ -1,0 +1,184 @@
+This was the original piece of code we were discussing. Basically, the issue being what if encounters 1-3 aren't 
+within our 90 days of each other, but encounters 2-4 are. The code doesn't loop back to check if encounters 2-4 
+are within our 90 days timeframe.
+
+*Dedup encounters by date; 
+proc sort data=outpt; by ssn d_event; run;
+proc sort data=outpt out=outpt_nodup nodupkey; by ssn d_event; run;
+data outpt_90day; retain incident_d_event d_event_90;
+set outpt_nodup; 
+by ssn; 
+
+format incident_d_event date9. d_event_90 date9.;
+
+if first.ssn then do; 
+	incident_d_event = d_event; 
+	d_event_90 = d_event + 90;
+end; 
+
+else if d_event > d_event_90 then do; 
+	incident_d_event= d_event; 
+	d_event_90 = d_event+90; 
+end; 
+run; 
+
+--------------------------------------------------
+
+*Case definition for outpatient:
+Three or more outpatient encounters within a 90-day period (but not on the same day) with a qualifying dx code in dx1 or 
+dx2 position;
+
+*Incidence rules for outpatient: 
+1. The first of the three or more outpatient medical encounters occurring within a 90-day period that includes a case 
+   defining diagnosis of colorectal cancer. 
+2. An individual is considered an incident case only once per lifetime.;
+
+*Create dataset. For our purposes, let's assume everyone has a diagnostic code of interest;
+data create_data; 
+infile datalines dlm="|";
+input ssn $ date :date9.; 
+format date date9.;
+datalines; 
+1|13APR2020|
+1|13MAY2020|
+1|15JUL2020|
+1|08AUG2020|
+1|01SEP2021|
+3|02JAN2022|
+2|01APR2020|
+2|01MAY2020|
+2|31MAY2020|
+2|04OCT2021|
+3|01JAN2022|
+3|01JAN2022
+;
+run;
+*N=12;
+
+*Keep one record per person, per date since we only want records/encounters on different dates; 
+proc sort data=create_data out=create_data1 nodupkey; by ssn date; run;
+*N=11; 
+  
+*Restrict to three or more records. We are only interested in individuals with three or more encounters;
+proc sql; 
+	create table restrict_data as 
+	select *
+	from create_data1
+	group by ssn
+	having count(ssn) ge 3;
+quit; 
+*N=9 -- basically just getting rid of individual with SSN = 3; 
+
+proc sort data=restrict_data out=analysis_data; by ssn date; run;
+
+*Assign row counts by SSN. We will use this to loop through the data and check for three encounters within 90 days 
+for an individual;
+data analysis_data1; retain row; 
+set analysis_data; 
+by ssn;
+if first.ssn then row = 1; 
+else row = row + 1;
+run;
+
+*This will serve as our endpoint for our do loop. Unfortunately, this is the best solution that I have since I do need an endpoint for my
+loop. I would prefer a loop that didn't cycle through my whole dataset; the issue I have with this is that it is going to loop through
+my data even when there are no longer matches to our case definition/groups of three encounters that are within 90 days. Additionally, 
+depending on the number of rows per person, it's potentially going to write a lot of datasets to my work file (but I also don't want to
+overwrite my files, so I'll just going to end with potentially excess work files).
+
+I would have preferred to remove all records for an SSN once we find records that meet our case definition; however, this would require 
+my loop endpoint to change everytime after I create the last dataset. I have tried nested macros, do until, re-creating the max row 
+after my new analysis dataset has been created, using eof 
+  (ex. something like this
+       data analysis_data&i;
+       if eof then call symputx('nobs',_n_-3);
+       set analysis_data&i end = eof; 
+       run; 
+       %if &nobs > 0 %then %do;), 
+but alas, noting has quite worked exactly how I want it to. I need a "known" endpoint to start my loop and then change to an "unknown" 
+endpoint after the first loop as run (or at least that's how I am thinking about it).; 
+
+proc sql noprint; 
+	select max(row) into :maxrow from analysis_data1;
+quit; 
+%put "Max row= &maxrow";
+*"Max row = 5";
+
+options mprint;
+
+%macro mtest; 
+
+%do i = 1 %to &maxrow;
+
+data out_data&i; retain row; 
+set analysis_data&i; 
+
+lag0 = .;
+lag1 = date; 
+lag2 = lag(date);
+lag3 = lag2(date);
+
+if row lt 1 then lag_date = lag0;
+else if row = 1 then lag_date = lag1; 
+else if row = 2 then lag_date = lag2;
+else lag_date = lag3;
+	
+format lag1 lag2 lag3 lag_date incident_date date9.; 
+
+/*Calculate days in between date and next two dates (total of three records)*/
+days_between = date - lag_date; 
+
+/*Look for 90 days in between dates on our third encounter*/
+if row = 3 and days_between gt 0 and days_between le 90 then do; 
+	flag = 1; 
+	incident_date = lag_date; 
+end; 
+
+run;
+
+/*Output our incident dates into a dataset*/
+proc append base=incident_enc data=out_data&i (where=(flag = 1)) force; run;
+	
+proc sort data=out_data&i; by ssn date row; run;
+
+/*We are basically reseting our data and changing the first row to be the following row. This was instead of evaluating 
+records 1-3, we can then look at 2-4 (will be the new rows 1-3)*/
+data analysis_data%eval(&i+1) (keep = ssn date incident_date row_new rename=(row_new = row)); 
+retain row_new; 
+set out_data&i; 
+by ssn; 
+row_new = row - 1; 
+run; 
+
+%end; 
+%mend mtest;
+
+*Call macro;
+%mtest
+
+*From incident_enc, we will use the ssn and incident encounter date to match back up with our full/original dataset. 
+This way we keep the info from the original record (which will contain things like the diagnostic code); 
+proc sql; 
+	create table incident_dates as 
+		select a.*, b.incident_date
+	from analysis_data as a left join incident_enc as b 
+	on a.ssn=b.ssn and a.date = b.incident_date;
+quit; 
+
+*Keep the record with the first incident date per person; 
+proc sort data=incident_dates; by ssn incident_date; run;
+proc sort data=incident_dates out=outpatient_cases nodupkey; by ssn; run;
+
+----- 
+Ideally, I would have liked to have something like this after the proc append so that way I'm not looping through all my records so many times 
+(especially since at some point there will be no more matches to my case definition), but like said, as of today, I don't quite have the solution for my 
+vision! The coding below would change the number of observations and then it would mess up my row counts so that would need to be reset and that's where 
+I haven't quite figured out how to make it all work. 
+
+proc sql;
+	create table reset_data&i as 
+		select ssn, date 
+	from outdata_&i (where=(row ne 1)) /*don't keep the first row because we will re-defining the first row*/
+		where ssn not in(select ssn from incident_enc) /*don't keep records that already have an incident encounter*/
+	order by ssn, date;
+quit;
