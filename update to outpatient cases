@@ -160,7 +160,7 @@ run;
 %mtest
 
 *Inner join with original dataset to pull out our records that have an incident encounter that matches our case definition;
-*This way we keep the info from the original record (which will contain things like the diagnostic code); 
+*This way we keep the info from the original record/first encounter with the incident date (which will contain things like the diagnostic code); 
 proc sql; 
 	create table incident_dates as 
 		select a.*, b.incident_date
