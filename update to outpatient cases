@@ -83,23 +83,22 @@ if first.ssn then row = 1;
 else row = row + 1;
 run;
 
-*This will serve as our endpoint for our do loop. Unfortunately, this is the best solution that I have since I do need an endpoint for my
-loop. I would prefer a loop that didn't cycle through my whole dataset; the issue I have with this is that it is going to loop through
+*The "maxrow" macro will serve as our endpoint for our do loop. Unfortunately, this is the best solution that I have since I do need an endpoint for my
+loop. I would prefer a loop that didn't cycle through my whole dataset everytime; the issue I have with this is that it is going to loop through
 my data even when there are no longer matches to our case definition/groups of three encounters that are within 90 days. Additionally, 
 depending on the number of rows per person, it's potentially going to write a lot of datasets to my work file (but I also don't want to
-overwrite my files, so I'll just going to end with potentially excess work files).
+overwrite my files, so I'm just going to end with excess work files).
 
 I would have preferred to remove all records for an SSN once we find records that meet our case definition; however, this would require 
-my loop endpoint to change everytime after I create the last dataset. I have tried nested macros, do until, re-creating the max row 
-after my new analysis dataset has been created, using eof 
+my loop endpoint to change everytime after I create the last dataset in the loop (new endpoint would be based on how many records are in this dataset). 
+I have tried nested macros, do until, re-creating the max row after my new analysis dataset has been created, using eof 
   (ex. something like this
        data analysis_data&i;
        if eof then call symputx('nobs',_n_-3);
        set analysis_data&i end = eof; 
        run; 
        %if &nobs > 0 %then %do;), 
-but alas, noting has quite worked exactly how I want it to. I need a "known" endpoint to start my loop and then change to an "unknown" 
-endpoint after the first loop as run (or at least that's how I am thinking about it).; 
+but alas, nothing has quite worked exactly how I want it to.; 
 
 proc sql noprint; 
 	select max(row) into :maxrow from analysis_data1;
@@ -144,8 +143,8 @@ proc append base=incident_enc data=out_data&i (where=(flag = 1)) force; run;
 	
 proc sort data=out_data&i; by ssn date row; run;
 
-/*We are basically reseting our data and changing the first row to be the following row. This was instead of evaluating 
-records 1-3, we can then look at 2-4 (will be the new rows 1-3)*/
+/*We are basically resetting our data and changing the first row to be the following row. So instead of evaluating records 1-3, 
+we can then look at 2-4 (will be the new rows 1-3)*/
 data analysis_data%eval(&i+1) (keep = ssn date incident_date row_new rename=(row_new = row)); 
 retain row_new; 
 set out_data&i; 
@@ -170,6 +169,7 @@ quit;
 *N=3;
 
 *Keep the record with the first incident date per person; 
+*Keep one record per person, lifetime rule;
 proc sort data=incident_dates; by ssn incident_date; run;
 proc sort data=incident_dates out=outpatient_cases nodupkey; by ssn; run;
 *N=2;
@@ -177,8 +177,8 @@ proc sort data=incident_dates out=outpatient_cases nodupkey; by ssn; run;
 ----- 
 Ideally, I would have liked to have something like this after the proc append so that way I'm not looping through all my records so many times 
 (especially since at some point there will be no more matches to my case definition), but like said, as of today, I don't quite have the solution for my 
-vision! The coding below would change the number of observations and then it would mess up my row counts so that would need to be reset and that's where 
-I haven't quite figured out how to make it all work. 
+vision! The coding below would change the number of observations in the dataset and and the current maxrow macro/do loop is based on the original dataset.
+I haven't quite figured out how to make what I actually work yet, but the code above works for now. 
 
 proc sql;
 	create table reset_data&i as 
