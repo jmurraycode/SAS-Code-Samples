@@ -43,7 +43,7 @@ datalines;
 1|13MAY2020|
 1|15JUL2020|
 1|08AUG2020|
-1|01SEP2021|
+1|01SEP2020|
 3|02JAN2022|
 2|01APR2020|
 2|01MAY2020|
@@ -54,6 +54,9 @@ datalines;
 ;
 run;
 *N=12;
+*For SSN1, encounters from 31MAY2020 - 08AUG2020 and 15JUL2020 - 01SEP2020 will match the case definition for incidence;
+*For SSN2, encounters from 01APR2020 - 31MAY2020 will match the case definition for incidence;
+*For SSN3, no encounters will match the case definition for incidence;
 
 *Keep one record per person, per date since we only want records/encounters on different dates; 
 proc sort data=create_data out=create_data1 nodupkey; by ssn date; run;
@@ -156,18 +159,20 @@ run;
 *Call macro;
 %mtest
 
-*From incident_enc, we will use the ssn and incident encounter date to match back up with our full/original dataset. 
-This way we keep the info from the original record (which will contain things like the diagnostic code); 
+*Inner join with original dataset to pull out our records that have an incident encounter that matches our case definition;
+*This way we keep the info from the original record (which will contain things like the diagnostic code); 
 proc sql; 
 	create table incident_dates as 
 		select a.*, b.incident_date
-	from analysis_data as a left join incident_enc as b 
+	from analysis_data as a inner join incident_enc as b 
 	on a.ssn=b.ssn and a.date = b.incident_date;
 quit; 
+*N=3;
 
-*Keep the record with the first incident date per person. Sort so non-missing dates end up first in dataset; 
-proc sort data=incident_dates; by ssn descending incident_date; run;
+*Keep the record with the first incident date per person; 
+proc sort data=incident_dates; by ssn incident_date; run;
 proc sort data=incident_dates out=outpatient_cases nodupkey; by ssn; run;
+*N=2;
 
 ----- 
 Ideally, I would have liked to have something like this after the proc append so that way I'm not looping through all my records so many times 
